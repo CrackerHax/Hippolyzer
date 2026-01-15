@@ -283,6 +283,8 @@ class HippoClientRegion(BaseClientRegion):
 
     async def _poll_event_queue(self):
         ack: Optional[int] = None
+        consecutive_failures = 0
+        max_consecutive_failures = 3
         while True:
             payload = {"ack": ack, "done": False}
             try:
@@ -301,10 +303,19 @@ class HippoClientRegion(BaseClientRegion):
                         self.session().message_handler.handle(msg)
                         self.message_handler.handle(msg)
                     ack = polled["id"]
+                    consecutive_failures = 0  # Reset on success
                     await asyncio.sleep(0.001)
             except aiohttp.client_exceptions.ServerDisconnectedError:
                 # This is expected to happen during long-polling, just pick up again where we left off.
                 await asyncio.sleep(0.001)
+            except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as e:
+                consecutive_failures += 1
+                LOG.warning(f"EQ Poll failed ({type(e).__name__}): {consecutive_failures}/{max_consecutive_failures}")
+                if consecutive_failures >= max_consecutive_failures:
+                    LOG.error(f"EQ Poll failed {max_consecutive_failures} times consecutively. Signaling reconnection needed.")
+                    # Signal that we need to reconnect by raising an exception
+                    raise ConnectionError(f"EQ Poll failed {max_consecutive_failures} times - reconnection needed")
+                await asyncio.sleep(1.0)  # Wait a bit before retrying
 
     async def _handle_ping_check(self, message: Message):
         self.circuit.send(
